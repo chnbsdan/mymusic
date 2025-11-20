@@ -633,7 +633,7 @@
                     <span class="btn" data-tab="playing">正在播放</span>
                     <span class="btn active" data-tab="search">歌曲搜索</span>
                     <span class="btn" data-tab="favorites">我的收藏</span>
-                    <span class="btn" onclick="showMessage('技术支持: 基于网易云音乐API')">技术支持</span>
+                    <span class="btn" onclick="showMessage('技术支持: 基于网易云音乐API，部署在Vercel')">技术支持</span>
                 </div>
             </div>
             
@@ -737,6 +737,17 @@
         // 代理服务器配置 - Vercel环境
         const PROXY_SERVER = '/api/proxy';
         
+        // 保留您原来的所有API接口作为备用
+        const API_BASES = [
+            'https://musicapi.hangdn.com',
+            'https://music.gdstudio.org',
+            'https://wy.1356666.xyz', 
+            'https://music-api.heheda.top',
+            'https://api.injahow.cn/meting',
+            'https://music.163api.xyz',
+            'https://music-api.898899.xyz'
+        ];
+        
         let currentAudio = new Audio();
         let currentState = {
             isPlaying: false,
@@ -748,7 +759,10 @@
             lyricData: [],
             playMode: 'listloop',
             audioQuality: 'standard',
-            favorites: new Map()
+            favorites: new Map(),
+            retryCount: 0,
+            maxRetries: 3,
+            currentAPI: null
         };
 
         // 音频质量映射
@@ -760,9 +774,10 @@
 
         // 随机关键词库
         const randomKeywords = [
-            '周杰伦', '林俊杰', '邓紫棋', '薛之谦', '陈奕迅',
-            'Taylor Swift', 'Ed Sheeran', 'Adele',
-            '流行', '摇滚', '民谣', '电子', '古典'
+            '周杰伦', '林俊杰', '邓紫棋', '薛之谦', '陈奕迅', '王菲',
+            'Taylor Swift', 'Ed Sheeran', 'Beyoncé', 'Adele', 'Justin Bieber',
+            '流行', '摇滚', '民谣', '电子', '古典', '爵士', '轻音乐', 
+            '华语', '欧美', '日韩', '经典', '新歌', '热歌'
         ];
 
         // 页面加载完成后初始化
@@ -811,12 +826,14 @@
                 const response = await fetch(`${PROXY_SERVER}/health`);
                 const data = await response.json();
                 console.log('代理服务器状态:', data);
+                showMessage('代理服务器连接正常');
             } catch (error) {
                 console.log('代理服务器连接测试失败:', error);
+                showMessage('代理服务器连接失败，使用备用API');
             }
         }
 
-        // 代理请求函数
+        // 代理请求函数 - 优先使用代理，失败时使用备用API
         async function proxyRequest(types, params = {}) {
             const queryParams = new URLSearchParams({
                 types: types,
@@ -832,14 +849,67 @@
                 const data = await response.json();
                 
                 if (data.code === 200) {
+                    console.log(`[DEBUG] 代理请求成功，使用的API: ${data.apiUsed}`);
                     return data.data;
                 } else {
                     throw new Error(data.msg || '代理请求失败');
                 }
             } catch (error) {
                 console.error(`代理请求失败 (${types}):`, error);
-                throw error;
+                // 代理失败时，使用原来的直接API调用
+                return await directAPIRequest(types, params);
             }
+        }
+
+        // 直接API请求（备用方案）
+        async function directAPIRequest(types, params = {}) {
+            const { keywords, limit = 50, id, br = 'exhigh' } = params;
+            
+            // 随机选择一个备用API
+            const api = API_BASES[Math.floor(Math.random() * API_BASES.length)];
+            let apiUrl = '';
+            
+            if (api.includes('meting')) {
+                // meting API格式
+                switch (types) {
+                    case 'search':
+                        apiUrl = `${api}?type=search&id=${encodeURIComponent(keywords)}`;
+                        break;
+                    case 'url':
+                        apiUrl = `${api}?type=url&id=${id}`;
+                        break;
+                    case 'lyric':
+                        apiUrl = `${api}?type=lyric&id=${id}`;
+                        break;
+                }
+            } else {
+                // 标准网易云API格式
+                switch (types) {
+                    case 'search':
+                        apiUrl = `${api}/search?keywords=${encodeURIComponent(keywords)}&limit=${limit}`;
+                        break;
+                    case 'url':
+                        const levelMap = {
+                            'standard': 'standard',
+                            'higher': 'higher', 
+                            'exhigh': 'exhigh',
+                            'lossless': 'lossless'
+                        };
+                        const level = levelMap[br] || 'exhigh';
+                        apiUrl = `${api}/song/url/v1?id=${id}&level=${level}`;
+                        break;
+                    case 'lyric':
+                        apiUrl = `${api}/lyric?id=${id}`;
+                        break;
+                    case 'detail':
+                        apiUrl = `${api}/song/detail?ids=${id}`;
+                        break;
+                }
+            }
+            
+            console.log(`[DEBUG] 使用备用API: ${apiUrl}`);
+            const response = await fetch(apiUrl);
+            return await response.json();
         }
 
         // 切换标签页
@@ -880,6 +950,8 @@
                 let songs = [];
                 if (data.result && data.result.songs) {
                     songs = data.result.songs;
+                } else if (data.data) {
+                    songs = data.data;
                 }
                 
                 if (songs && songs.length > 0) {
@@ -910,17 +982,20 @@
                     keywords: keyword,
                     limit: 50
                 });
-                
+
+                // 处理不同的API响应格式
                 let songs = [];
-                if (data.result && data.result.songs) {
+                if (data.code === 200 && data.result && data.result.songs) {
                     songs = data.result.songs;
+                } else if (data.data) {
+                    songs = data.data;
                 }
                 
                 if (songs && songs.length > 0) {
                     currentState.searchResults = songs;
                     displaySearchResults(songs);
                 } else {
-                    throw new Error('未找到相关歌曲');
+                    throw new Error(data.msg || '搜索失败');
                 }
             } catch (error) {
                 resultsDiv.innerHTML = '<div class="error">搜索失败: ' + error.message + '</div>';
@@ -938,11 +1013,12 @@
 
             let html = '';
             songs.forEach((song, index) => {
-                const songName = song.name || '未知歌曲';
+                // 处理不同的歌曲数据格式
+                const songName = song.name || song.title || '未知歌曲';
                 const artists = song.ar ? 
                     song.ar.map(a => a.name).join(' / ') : 
                     (song.artists ? (Array.isArray(song.artists) ? song.artists.map(a => a.name).join(' / ') : song.artists) : '未知歌手');
-                const album = song.al ? song.al.name : (song.album ? song.album.name : '未知专辑');
+                const album = song.al ? song.al.name : (song.album ? (song.album.name || song.album) : '未知专辑');
                 const duration = formatTime(song.dt || song.duration || 0);
                 const songId = song.id;
                 const isFavorited = currentState.favorites.has(songId);
@@ -966,12 +1042,13 @@
             resultsDiv.innerHTML = html;
         }
 
-        // 播放歌曲
+        // AI超强播放函数 - 终极解决方案
         async function playSong(songId, index) {
             try {
-                console.log('开始播放:', songId);
+                console.log('AI超强播放开始:', songId);
                 
                 // 重置状态
+                currentState.retryCount = 0;
                 resetPlayerUI();
                 
                 // 获取歌曲信息
@@ -995,24 +1072,28 @@
                     loadLyric(songId)
                 ]);
                 
-                // 获取音频URL
-                const audioUrl = await getAudioUrl(songId);
+                // 使用AI超强音频URL获取
+                const audioUrl = await getSuperAudioUrl(songId);
                 
                 if (audioUrl) {
-                    console.log('获取到可播放URL:', audioUrl);
+                    console.log('AI获取到可播放URL:', audioUrl);
                     await startAudioPlayback(audioUrl, song);
                 } else {
-                    throw new Error('无法获取音频URL');
+                    console.log('AI无法获取可播放URL，尝试终极备用方案');
+                    await tryUltimateBackup(songId, song, index);
                 }
                 
             } catch (error) {
-                console.error('播放错误:', error);
+                console.error('AI播放错误:', error);
                 showMessage('播放出错: ' + error.message);
+                setTimeout(() => {
+                    playNext();
+                }, 1500);
             }
         }
 
-        // 获取音频URL
-        async function getAudioUrl(songId) {
+        // AI超强音频URL获取 - 终极解决方案
+        async function getSuperAudioUrl(songId) {
             const quality = qualityMap[currentState.audioQuality];
             
             try {
@@ -1020,54 +1101,120 @@
                     id: songId,
                     br: quality
                 });
-                
+
                 let audioUrl = null;
                 
+                // 处理不同的响应格式
                 if (data.data && data.data[0] && data.data[0].url) {
                     audioUrl = data.data[0].url;
+                } else if (data.url) {
+                    audioUrl = data.url;
+                } else if (data.data && data.data.url) {
+                    audioUrl = data.data.url;
                 }
                 
-                if (audioUrl && audioUrl !== 'null') {
-                    console.log('代理获取音频URL成功:', audioUrl);
+                if (audioUrl && audioUrl !== 'null' && await verifyUrlAccessibility(audioUrl)) {
+                    console.log('获取音频URL成功:', audioUrl);
                     return audioUrl;
                 }
                 
                 throw new Error('无法获取有效音频URL');
             } catch (error) {
                 console.log('代理获取音频URL失败:', error);
-                // 备用方案
                 return await getBackupAudioUrl(songId);
+            }
+        }
+
+        // 验证URL可访问性
+        async function verifyUrlAccessibility(url) {
+            try {
+                const response = await fetch(url, { 
+                    method: 'HEAD',
+                    signal: AbortSignal.timeout(3000)
+                });
+                return response.ok;
+            } catch (error) {
+                console.log('URL验证失败:', url, error.message);
+                return false;
             }
         }
 
         // 备用音频源方案
         async function getBackupAudioUrl(songId) {
-            const backupSources = [
-                `https://music.163api.xyz/song/url?id=${songId}`,
-                `https://api.injahow.cn/meting/?type=url&id=${songId}`,
-            ];
+            const quality = qualityMap[currentState.audioQuality];
             
-            for (const source of backupSources) {
+            for (const api of API_BASES) {
                 try {
-                    const response = await fetch(source);
-                    const data = await response.json();
-                    let audioUrl = null;
+                    let url = '';
+                    if (api.includes('meting')) {
+                        url = `${api}?type=url&id=${songId}`;
+                    } else {
+                        url = `${api}/song/url/v1?id=${songId}&level=${quality}`;
+                    }
                     
+                    const response = await fetch(url);
+                    const data = await response.json();
+                    
+                    let audioUrl = null;
                     if (data.data && data.data[0] && data.data[0].url) {
                         audioUrl = data.data[0].url;
                     } else if (data.url) {
                         audioUrl = data.url;
+                    } else if (data.data && data.data.url) {
+                        audioUrl = data.data.url;
                     }
                     
-                    if (audioUrl && audioUrl !== 'null') {
+                    if (audioUrl && audioUrl !== 'null' && await verifyUrlAccessibility(audioUrl)) {
                         return audioUrl;
                     }
                 } catch (error) {
-                    console.log(`备用源 ${source} 失败:`, error.message);
+                    console.log(`备用API ${api} 失败:`, error.message);
                 }
             }
             
-            throw new Error('无法获取音频URL');
+            throw new Error('所有API都无法获取音频URL');
+        }
+
+        // 终极备用方案
+        async function tryUltimateBackup(songId, song, index) {
+            console.log('AI启动终极备用方案...');
+            currentState.retryCount++;
+            
+            if (currentState.retryCount > currentState.maxRetries) {
+                console.log('AI超过最大重试次数，跳转下一首');
+                showMessage('播放失败，跳转到下一首');
+                setTimeout(() => playNext(), 1000);
+                return;
+            }
+            
+            // 方案1: 尝试所有音质等级
+            const qualities = ['standard', 'high', 'lossless'];
+            for (const quality of qualities) {
+                try {
+                    const data = await proxyRequest('url', {
+                        id: songId,
+                        br: quality
+                    });
+                    
+                    let audioUrl = null;
+                    if (data.data && data.data[0] && data.data[0].url) {
+                        audioUrl = data.data[0].url;
+                    }
+                    
+                    if (audioUrl && audioUrl !== 'null') {
+                        await startAudioPlayback(audioUrl, song);
+                        showMessage(`播放成功 (${quality}音质)`);
+                        return;
+                    }
+                } catch (error) {
+                    console.log(`AI音质 ${quality} 播放失败`);
+                }
+            }
+            
+            // 所有方案都失败，跳转下一首
+            console.log('AI所有播放方案均失败，跳转下一首');
+            showMessage('播放失败，跳转到下一首');
+            setTimeout(() => playNext(), 1000);
         }
 
         // 开始音频播放
@@ -1081,6 +1228,7 @@
                 currentAudio.src = audioUrl;
                 currentAudio.volume = currentState.volume;
                 currentAudio.preload = 'auto';
+                currentAudio.crossOrigin = 'anonymous';
                 
                 // 重新初始化音频事件
                 initAudioEvents();
@@ -1091,11 +1239,11 @@
                 document.querySelector('.play-btn').innerHTML = '❚❚';
                 document.getElementById('cover').classList.add('playing');
                 
-                console.log('播放成功');
-                showMessage(`正在播放: ${song.name}`);
+                console.log('AI播放成功');
+                showMessage(`正在播放: ${song.name || song.title}`);
                 
             } catch (playError) {
-                console.error('播放失败:', playError);
+                console.error('AI播放失败:', playError);
                 throw new Error('音频播放失败: ' + playError.message);
             }
         }
@@ -1150,6 +1298,13 @@
                     coverUrl = song.al.picUrl;
                 }
                 
+                // 方法3: 使用图片ID生成
+                if (!coverUrl && song.al && song.al.picId) {
+                    const servers = ['p1', 'p2', 'p3', 'p4'];
+                    const server = servers[Math.floor(Math.random() * servers.length)];
+                    coverUrl = `https://${server}.music.126.net/${song.al.picId}.jpg`;
+                }
+                
                 // 确保URL格式正确
                 if (coverUrl) {
                     if (!coverUrl.startsWith('http')) {
@@ -1158,7 +1313,7 @@
                     coverUrl += '?param=300y300';
                 } else {
                     // 生成AI封面
-                    coverUrl = generateAICover(song.name, 
+                    coverUrl = generateAICover(song.name || song.title, 
                         song.ar ? song.ar[0].name : '未知歌手');
                 }
                 
@@ -1170,7 +1325,7 @@
                     defaultCover.style.display = 'none';
                 };
                 img.onerror = function() {
-                    coverImg.src = generateAICover(song.name, 
+                    coverImg.src = generateAICover(song.name || song.title, 
                         song.ar ? song.ar[0].name : '未知歌手');
                     coverImg.style.display = 'block';
                     defaultCover.style.display = 'none';
@@ -1179,7 +1334,7 @@
                 
             } catch (error) {
                 console.error('封面加载错误:', error);
-                coverImg.src = generateAICover(song.name, 
+                coverImg.src = generateAICover(song.name || song.title, 
                     song.ar ? song.ar[0].name : '未知歌手');
                 coverImg.style.display = 'block';
                 defaultCover.style.display = 'none';
@@ -1247,7 +1402,7 @@
                 showMessage('请先选择歌曲');
                 return;
             }
-            const songName = currentState.currentSong.name;
+            const songName = currentState.currentSong.name || currentState.currentSong.title;
             const artist = currentState.currentSong.ar ? 
                 currentState.currentSong.ar[0].name : '未知歌手';
             toggleFavorite(currentState.currentSong.id, songName, artist);
@@ -1259,6 +1414,7 @@
                 try {
                     const favoritesData = JSON.parse(saved);
                     currentState.favorites = new Map(favoritesData);
+                console.log('加载收藏:', currentState.favorites.size + ' 首歌曲');
                 } catch (error) {
                     console.error('加载收藏失败:', error);
                     currentState.favorites = new Map();
@@ -1269,6 +1425,7 @@
         function saveFavorites() {
             const favoritesArray = Array.from(currentState.favorites.entries());
             localStorage.setItem('musicFavorites', JSON.stringify(favoritesArray));
+            console.log('保存收藏:', favoritesArray.length + ' 首歌曲');
         }
 
         function displayFavorites() {
@@ -1306,7 +1463,30 @@
             if (songIndex !== -1) {
                 await playSong(songId, songIndex);
             } else {
-                showMessage('歌曲不在当前搜索结果中');
+                try {
+                    const favoriteSong = currentState.favorites.get(songId);
+                    const data = await proxyRequest('search', {
+                        keywords: favoriteSong.name,
+                        limit: 1
+                    });
+                    
+                    let songs = [];
+                    if (data.result && data.result.songs) {
+                        songs = data.result.songs;
+                    } else if (data.data) {
+                        songs = data.data;
+                    }
+                    
+                    if (songs && songs.length > 0) {
+                        const song = songs[0];
+                        currentState.searchResults = [song];
+                        await playSong(songId, 0);
+                    } else {
+                        showMessage('无法播放收藏的歌曲');
+                    }
+                } catch (error) {
+                    showMessage('播放收藏歌曲失败: ' + error.message);
+                }
             }
         }
 
@@ -1337,8 +1517,12 @@
 
                 const lyricContent = document.getElementById('lyricContent');
                 
+                // 处理网易云音乐歌词格式
                 if (data.lrc && data.lrc.lyric) {
                     currentState.lyricData = parseLyric(data.lrc.lyric);
+                    displayLyric(currentState.lyricData);
+                } else if (data.lyric) {
+                    currentState.lyricData = parseLyric(data.lyric);
                     displayLyric(currentState.lyricData);
                 } else {
                     lyricContent.innerHTML = '<div class="lyric-line">暂无歌词</div>';
@@ -1466,7 +1650,12 @@
             
             currentAudio.addEventListener('error', function(e) {
                 console.error('音频播放错误:', e);
-                showMessage('播放出错');
+                showMessage('播放出错，跳转到下一首');
+                setTimeout(() => playNext(), 1000);
+            });
+
+            currentAudio.addEventListener('canplay', function() {
+                console.log('音频可以播放');
             });
         }
 
@@ -1493,16 +1682,18 @@
                 showMessage('请先选择歌曲');
                 return;
             }
-            const songName = currentState.currentSong.name;
+            const songName = currentState.currentSong.name || currentState.currentSong.title;
             downloadSong(currentState.currentSong.id, songName);
         }
 
         // 下载歌曲
-        async function downloadSong(songId, songName) {
+        async function downloadSong(songId, songName, retryCount = 0) {
+            const maxRetries = 2;
+            
             try {
                 showMessage(`开始准备下载: ${songName}`);
                 
-                const audioUrl = await getAudioUrl(songId);
+                const audioUrl = await getSuperAudioUrl(songId);
                 
                 if (audioUrl) {
                     const a = document.createElement('a');
@@ -1519,8 +1710,14 @@
                 }
                 
             } catch (error) {
-                console.error('下载失败:', error);
-                showMessage('下载失败，请稍后重试');
+                console.error(`下载失败 (尝试次数: ${retryCount + 1}):`, error);
+                
+                if (retryCount < maxRetries) {
+                    showMessage(`下载失败，正在重试... (${retryCount + 1}/${maxRetries})`);
+                    setTimeout(() => downloadSong(songId, songName, retryCount + 1), 1000 * (retryCount + 1));
+                } else {
+                    showMessage('下载失败，请稍后重试');
+                }
             }
         }
 
@@ -1563,9 +1760,10 @@
         }
 
         function updateMusicInfo(song) {
-            const songName = song.name;
+            const songName = song.name || song.title;
             const artists = song.ar ? 
-                song.ar.map(a => a.name).join(' / ') : '未知歌手';
+                song.ar.map(a => a.name).join(' / ') : 
+                (song.artists ? (Array.isArray(song.artists) ? song.artists.map(a => a.name).join(' / ') : song.artists) : '未知歌手');
             document.getElementById('musicInfo').textContent = `${songName} - ${artists}`;
         }
 
@@ -1575,9 +1773,10 @@
             
             let html = '';
             currentState.currentPlaylist.forEach((song, index) => {
-                const songName = song.name;
+                const songName = song.name || song.title;
                 const artists = song.ar ? 
-                    song.ar.map(a => a.name).join(' / ') : '未知歌手';
+                    song.ar.map(a => a.name).join(' / ') : 
+                    (song.artists ? (Array.isArray(song.artists) ? song.artists.map(a => a.name).join(' / ') : song.artists) : '未知歌手');
                 const duration = formatTime(song.dt || song.duration || 0);
                 const activeClass = index === currentState.currentIndex ? 'active' : '';
                 const isFavorited = currentState.favorites.has(song.id);
